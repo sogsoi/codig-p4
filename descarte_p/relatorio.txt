@@ -1,0 +1,64 @@
+Trabalho 3
+
+1. Anomalia escolhida
+
+Foi escolhida a varredura de portas TCP, o port scan do tipo SYN. É considerado anômalo o host que manda SYN para muitas portas de destino diferentes em pouco tempo. Um cliente normal usa poucas portas, enquanto um scanner como o nmap testa centenas por segundo. O critério usado foi mais de 20 portas distintas por origem em uma janela de cerca de 1 segundo.
+
+2. Detector
+
+O estado fica em registradores do switch BMv2. A origem é identificada pelo terceiro octeto do IP, o que evita colisão na topologia usada. A janela de tempo é o timestamp de ingresso deslocado em 20 bits, cerca de 1,05 s.
+
+Para cada SYN, o switch calcula dois hashes sobre IP de origem, porta de destino e janela, e consulta um filtro de Bloom. Se a porta é nova, o contador da origem é incrementado. Passando de 20, a origem é tratada como anômala. Na virada da janela, a classificação continua se a janela anterior foi anômala e volta ao normal caso contrário. Também são guardados o tempo do primeiro SYN e da 21ª porta distinta, para medir o tempo de detecção.
+
+3. Tratamento
+
+Foram implementadas duas estratégias, escolhidas por um registrador que pode ser alterado sem recompilar. Assim todas as políticas rodam nas mesmas condições.
+
+Descarte total: todos os pacotes da origem anômala são descartados.
+
+Descarte probabilístico: cada pacote da origem anômala é descartado com probabilidade de 50% se ela sondou de 21 a 40 portas na janela e de 90% acima disso, ou seja, proporcional à intensidade.
+
+4. Cenário
+
+Um switch e três hosts. O H1 gera tráfego normal, o H2 faz o scan e o H3 é o servidor, com iperf na porta 5001 e HTTP nas portas 80 e 443. O H1 roda iperf por 12 s e ping. Três segundos depois, o H2 roda ping e nmap -sS nas portas 1 a 1024. Cada política foi executada 3 vezes e foi usada a média.
+
+5. Como executar
+
+Na VM do tutorial de P4, com scan.p4, topology.json, s1-runtime.json e experimento.py na pasta do exercício, precisa ter iperf e nmap também.
+
+Terminal 1, deixando aberto no prompt mininet>:
+
+    make clean && make run
+
+Terminal 2:
+
+    sudo env "PATH=$PATH" python3 experimento.py
+
+O script roda as três políticas, 3 vezes cada, e imprime ao final a média e o desvio de cada métrica. Os arquivos ping_*.txt, iperf_*.txt e srv*.txt criados na pasta são temporários.
+
+Para trocar a política manualmente, usar 0 para sem mitigação, 1 para descarte total e 2 para probabilístico:
+
+    simple_switch_CLI --thrift-port 9090
+    register_write MyIngress.reg_mode 0 1
+
+6. Resultados
+
+Sem mitigação, o H1 teve 3,25 Mbps e RTT de 565 ms, sem perda. O scan durou 13 s e nada foi descartado.
+
+Com descarte total, o H1 teve 3,60 Mbps e RTT de 444 ms, sem perda. O H2 perdeu 52% dos pings, o scan durou 24,8 s e 85% dos pacotes do H2 foram descartados.
+
+Com descarte probabilístico, o H1 teve 3,28 Mbps e RTT de 545 ms, sem perda. O H2 perdeu 56% dos pings, o scan durou 18,3 s e 69% dos pacotes do H2 foram descartados.
+
+O tempo de detecção ficou entre 0,67 e 0,87 s nas três situações. Nenhum pacote do H1 foi descartado.
+
+7. Discussão
+
+O descarte total atrapalhou mais o scanner, com scan quase duas vezes mais longo, e beneficiou mais o H1, que ganhou cerca de 11% de throughput e reduziu o RTT em cerca de 22%, porque o H2 deixou de ocupar a fila. No probabilístico o ganho do H1 ficou dentro da variação entre execuções.
+
+A perda de ping do H2 foi parecida nas duas políticas, já que ambas descartam qualquer pacote da origem anômala. O tempo de detecção não mudou entre as políticas, pois depende do ritmo do nmap e não do tratamento.
+
+O descarte total protege mais a rede, mas é tudo ou nada e pode punir tráfego legítimo se houver classificação errada. O probabilístico é mais brando, mas alivia menos o tráfego normal.
+
+8. Limitações
+O mecanismo retarda o scan, mas não o impede. Os primeiros 20 SYNs passam antes da detecção, por isso o nmap ainda viu 2 portas abertas em todas as políticas. O detector cobre apenas varredura TCP SYN.
+
